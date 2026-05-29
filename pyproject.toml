@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "us-equity-backtester"
+version = "0.1.0"
+description = "Vectorized backtester specialized for the US equities market."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "yfinance>=0.2.40",
+    "pandas-market-calendars>=4.4",
+    "pyarrow>=14.0",
+    "lxml>=4.9",
+    "requests>=2.30",
+    "statsmodels>=0.14",
+    "scikit-learn>=1.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+backtest = "equity_backtester.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
