@@ -158,3 +158,24 @@ def test_membership_mask_forces_exit_when_member_removed():
     assert (res.positions["B"].iloc[1:10] > 0).all()
     # Post-shift mask drops B to zero the day membership flips, and it stays out.
     assert (res.positions["B"].iloc[10:] == 0.0).all()
+
+
+def test_missing_open_carries_position_instead_of_liquidating_at_zero():
+    """A held name with no open/close print (halt or data gap) must be carried at
+    its last known price, not force-sold at $0 (regression: a NaN open once zeroed
+    target shares, destroying the position permanently)."""
+    n = 10
+    dates = pd.bdate_range("2020-01-01", periods=n)
+    prices = pd.DataFrame({"A": [100.0] * n}, index=dates)
+    gapped = prices.copy()
+    gapped.iloc[5, 0] = np.nan  # day 5: no print at all (open == close == NaN)
+
+    res = run_backtest(gapped, gapped, AlwaysLong(), _no_fees(), starting_cash=10_000.0)
+
+    # The gap day is a no-op: the holding is valued at its last known price, so
+    # equity neither vaporizes on day 5 nor afterward.
+    assert float(res.equity_curve.iloc[5]) == pytest.approx(10_000.0, rel=1e-9)
+    assert float(res.equity_curve.iloc[-1]) == pytest.approx(10_000.0, rel=1e-9)
+    assert float(res.positions["A"].iloc[5]) == pytest.approx(100.0, rel=1e-9)
+    # Only the initial buy trades; the gap never triggers a forced sell/rebuy.
+    assert (res.trades["A"].iloc[2:] == 0.0).all()

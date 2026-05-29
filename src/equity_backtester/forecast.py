@@ -56,10 +56,14 @@ def build_design_matrix(
     """
     if not signal_panels:
         raise ValueError("signal_panels is empty")
-    features = pd.DataFrame(
-        {name: panel.stack() for name, panel in signal_panels.items()}
-    )
-    labels = fwd_returns.stack()
+    # yfinance can emit a duplicated ticker column; a duplicated (date, ticker)
+    # index breaks the join below, so keep the first column for each name.
+    panels = {
+        name: panel.loc[:, ~panel.columns.duplicated()]
+        for name, panel in signal_panels.items()
+    }
+    features = pd.DataFrame({name: panel.stack() for name, panel in panels.items()})
+    labels = fwd_returns.loc[:, ~fwd_returns.columns.duplicated()].stack()
     labels.name = "_label"
     combined = features.join(labels, how="inner").dropna()
     X = combined[list(signal_panels)]

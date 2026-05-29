@@ -65,6 +65,21 @@ def test_build_design_matrix_raises_on_empty():
         build_design_matrix({}, pd.DataFrame())
 
 
+def test_build_design_matrix_tolerates_duplicate_columns():
+    """yfinance sometimes emits a duplicated ticker column; the duplicate once
+    produced a non-unique (date, ticker) index that crashed the join."""
+    dates = pd.bdate_range("2020-01-01", periods=2)
+    f0 = pd.DataFrame([[1.0, 9.0], [2.0, 8.0]], index=dates, columns=["A", "A"])  # dup col
+    fwd = pd.DataFrame({"A": [0.1, 0.2]}, index=dates)
+
+    X, y = build_design_matrix({"f0": f0}, fwd)
+
+    assert list(X.columns) == ["f0"]
+    assert X.index.is_unique
+    assert X.index.names == ["date", "ticker"]
+    assert X.loc[(dates[0], "A"), "f0"] == 1.0  # first occurrence kept
+
+
 # --- learning behavior ------------------------------------------------------
 
 def test_no_leakage_random_features_give_zero_ic():

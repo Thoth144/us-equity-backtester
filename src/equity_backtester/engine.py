@@ -83,6 +83,7 @@ def run_backtest(
 
     cash = float(starting_cash)
     prev_shares = np.zeros(n_tickers)
+    last_px = np.zeros(n_tickers)  # last known price, to value names that don't print
 
     for i in range(n_days):
         open_px = opens_arr[i]
@@ -91,23 +92,34 @@ def run_backtest(
 
         open_safe = np.nan_to_num(open_px, nan=0.0)
         close_safe = np.nan_to_num(close_px, nan=0.0)
+        open_valid = open_safe > 0
+        close_valid = close_safe > 0
 
-        # Mark-to-market at the open before trading.
-        pv = cash + float(np.dot(prev_shares, open_safe))
+        # Mark-to-market at the open before trading. A name with no open print
+        # (halt or data gap) is valued at its last known price, not zero.
+        val_px = np.where(open_valid, open_safe, last_px)
+        pv = cash + float(np.dot(prev_shares, val_px))
 
         target_dollars = tgt_w * pv
         with np.errstate(divide="ignore", invalid="ignore"):
-            target_shares = np.where(open_safe > 0, target_dollars / open_safe, 0.0)
+            # Only names with a tradable open can be rebalanced; carry the rest
+            # unchanged so a missing price never force-liquidates a holding at $0.
+            target_shares = np.where(open_valid, target_dollars / open_safe, prev_shares)
 
         day_trades = target_shares - prev_shares
         day_costs = cost_model.apply(day_trades, open_safe)
 
         cash -= float(np.dot(day_trades, open_safe)) + float(day_costs.sum())
 
+        # End-of-day mark: close if it printed, else the open/last-known price, so
+        # a gap day neither vaporizes value nor injects a spurious return blip.
+        eod_px = np.where(close_valid, close_safe, val_px)
+
         shares[i] = target_shares
         trades[i] = day_trades
         costs[i] = day_costs
-        equity[i] = cash + float(np.dot(target_shares, close_safe))
+        equity[i] = cash + float(np.dot(target_shares, eod_px))
+        last_px = np.where(close_valid, close_safe, np.where(open_valid, open_safe, last_px))
         prev_shares = target_shares
 
     equity_curve = pd.Series(equity, index=dates, name="equity")
