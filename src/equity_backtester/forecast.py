@@ -56,14 +56,24 @@ def build_design_matrix(
     """
     if not signal_panels:
         raise ValueError("signal_panels is empty")
-    # yfinance can emit a duplicated ticker column; a duplicated (date, ticker)
-    # index breaks the join below, so keep the first column for each name.
+    # Two index hazards break the (date, ticker) join below, so normalize the axes
+    # first. (1) yfinance can emit a duplicated ticker column -> a non-unique index,
+    # so keep the first column for each name. (2) Price panels inherit yfinance's
+    # "Ticker" column name while fundamental panels are built unnamed; mixing them
+    # makes the stacked level names disagree, and join() then silently falls back to
+    # a single-level (non-unique) join -- so force consistent axis names.
     panels = {
-        name: panel.loc[:, ~panel.columns.duplicated()]
+        name: panel.loc[:, ~panel.columns.duplicated()].rename_axis(
+            index="date", columns="ticker"
+        )
         for name, panel in signal_panels.items()
     }
     features = pd.DataFrame({name: panel.stack() for name, panel in panels.items()})
-    labels = fwd_returns.loc[:, ~fwd_returns.columns.duplicated()].stack()
+    labels = (
+        fwd_returns.loc[:, ~fwd_returns.columns.duplicated()]
+        .rename_axis(index="date", columns="ticker")
+        .stack()
+    )
     labels.name = "_label"
     combined = features.join(labels, how="inner").dropna()
     X = combined[list(signal_panels)]

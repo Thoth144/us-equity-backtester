@@ -80,6 +80,28 @@ def test_build_design_matrix_tolerates_duplicate_columns():
     assert X.loc[(dates[0], "A"), "f0"] == 1.0  # first occurrence kept
 
 
+def test_build_design_matrix_aligns_panels_with_mismatched_axis_names():
+    """Price panels inherit yfinance's 'Ticker' column name while fundamental
+    panels are built unnamed; mixing them once made stack() produce disagreeing
+    index level names, so join() fell back to a non-unique single-level join."""
+    dates = pd.bdate_range("2020-01-01", periods=3)
+    priced = pd.DataFrame({"A": [1.0, 2.0, 3.0], "B": [4.0, 5.0, 6.0]}, index=dates)
+    priced.columns.name = "Ticker"          # yfinance-style named column axis
+    fund = pd.DataFrame({"A": [7.0, 8.0, 9.0], "B": [10.0, 11.0, 12.0]}, index=dates)
+    # fund keeps the default unnamed axes -- the mismatch that triggered the bug
+    fwd = pd.DataFrame({"A": [0.1, 0.2, 0.3], "B": [0.4, 0.5, 0.6]}, index=dates)
+    fwd.columns.name = "Ticker"
+
+    X, y = build_design_matrix({"priced": priced, "fund": fund}, fwd)
+
+    assert list(X.columns) == ["priced", "fund"]
+    assert X.index.names == ["date", "ticker"]
+    assert X.index.is_unique
+    assert len(X) == 6  # 3 dates x 2 tickers, all complete
+    assert X.loc[(dates[0], "A"), "fund"] == 7.0  # alignment survived the rename
+    assert y.loc[(dates[1], "B")] == 0.5
+
+
 # --- learning behavior ------------------------------------------------------
 
 def test_no_leakage_random_features_give_zero_ic():
