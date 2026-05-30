@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "us-equity-backtester"
 version = "0.1.0"
-description = "Vectorized backtester specialized for the US equities market."
+description = "Leakage-safe US-equity research platform: point-in-time factor signals, ML return forecasting, cost-aware portfolios, and overfitting-aware validation."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
