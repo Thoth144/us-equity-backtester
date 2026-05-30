@@ -1,20 +1,42 @@
 # us-equity-backtester
 
-A small, vectorized backtester for US-equity strategies. Daily bars, long-only,
-adjusted prices, NYSE trading calendar, and realistic regulatory fees.
+A research platform for US-equity cross-sectional strategies, built around a
+single obsession: **not lying to yourself**. Every stage — universe
+construction, fundamentals, signals, model validation, portfolio simulation —
+is designed to be point-in-time and leakage-safe, and the validation layer is
+built to *detect* the overfitting that makes most backtests worthless.
 
-Ships with one strategy out of the box: **SMA(50, 200) crossover, long-only**.
+It started as a vectorized SMA-crossover backtester (still here, still the
+`backtest` CLI) and grew into a full pipeline in the spirit of Gu-Kelly-Xiu
+(2020) and López de Prado (2018): factor signals → ML return forecasts →
+cost-aware portfolios → honest out-of-sample evaluation.
 
-## What's "US-specialized" about it
+> **The honest result first.** Run on a survivor-only S&P 500 universe, the
+> price + fundamental signals here produce an information coefficient around
+> **0.03 (t ≈ 1.6)** — not distinguishable from noise — and the SMA(50, 200)
+> rule (~15.9% CAGR, 0.99 Sharpe) **underperforms** equal-weight buy-and-hold
+> (~18.2% CAGR, 1.02 Sharpe). There is no robust tradeable alpha in this data.
+> That's the point: the tooling is built to reach that conclusion instead of
+> manufacturing a false one. See [`dashboard.html`](dashboard.html) for the
+> full research write-up.
 
-- **NYSE calendar** via `pandas_market_calendars` — no weekends, no holidays.
-- **Adjusted prices** from yfinance (`auto_adjust=True`) — splits and dividends
-  are back-adjusted.
-- **Sell-side regulatory fees** modeled by default:
-  - SEC Section 31 fee: $27.80 per $1M of sale proceeds.
-  - FINRA Trading Activity Fee: $0.000166 per share, capped at $9.27 per trade.
-- **$0 commission** by default (Alpaca/Schwab/Robinhood retail). Configurable.
-- **Universe loader** for the current S&P 500 constituents.
+## What makes it "US-specialized" and honest
+
+- **Point-in-time S&P 500 / 600 membership** reconstructed from the Wikipedia
+  changes table — no survivorship bias from using today's index on history.
+- **Filing-date fundamentals** from SEC EDGAR: every datapoint is gated on the
+  date it was actually filed, never the fiscal-period end (the #1 silent
+  lookahead bug in fundamental backtests).
+- **NYSE trading calendar** (`pandas_market_calendars`, `XNYS`) and **adjusted
+  prices** (yfinance `auto_adjust`) — splits and dividends back-adjusted.
+- **Realistic US transaction costs** — SEC Section 31 fee, FINRA Trading
+  Activity Fee, configurable commission/slippage, and a Corwin-Schultz bid-ask
+  spread estimator for per-name costs.
+- **Leakage-safe validation** — purged walk-forward and combinatorial purged
+  cross-validation (CPCV), plus the overfitting statistics (PBO, Deflated and
+  Probabilistic Sharpe) that tell you whether a backtest is real.
+- **Next-open execution, no look-ahead** — signals use close-of-day data and
+  trade at the following session's open.
 
 ## Install
 
@@ -22,116 +44,135 @@ Ships with one strategy out of the box: **SMA(50, 200) crossover, long-only**.
 pip install -e ".[dev]"
 ```
 
-## Use
+Python ≥ 3.10. Core deps: pandas, numpy, yfinance, pandas-market-calendars,
+pyarrow, lxml, requests, statsmodels, scikit-learn.
+
+## Two ways in
+
+### 1. The CLI: an SMA-crossover backtest
 
 ```bash
-# Default: S&P 500, 2015-2025, SMA(50, 200), $100k starting capital
+# Default: current S&P 500, 2015-2025, SMA(50, 200), $100k
 backtest
 
-# Single ticker
-backtest --tickers SPY --start 2010-01-01 --end 2025-01-01
+# Survivorship-bias-free: reconstruct historical membership
+backtest --point-in-time --start 2010-01-01
 
-# Custom basket
-backtest --tickers AAPL MSFT NVDA GOOGL --start 2018-01-01
-
-# Export equity curve
-backtest --tickers SPY --output equity.csv
+# A custom basket, exporting the equity curve
+backtest --tickers AAPL MSFT NVDA GOOGL --start 2018-01-01 --output equity.csv
 ```
 
-From Python:
+### 2. The research API: signals → forecast → portfolio → validation
 
 ```python
-from equity_backtester import SMACrossover, CostModel, run_backtest, summarize
+from equity_backtester import (
+    sp500_membership_panel, momentum_signal, low_vol_signal, value_signal,
+    zscore_cross_section, forward_returns, monthly_rebalance_dates,
+    build_design_matrix, fit_cross_sectional_forecast,
+    scores_to_weights, backtest_portfolio, CostModel,
+    probability_of_backtest_overfitting, deflated_sharpe_ratio,
+)
 from equity_backtester.data import load_ohlc
 
-ohlc = load_ohlc(["SPY"], "2015-01-01", "2025-01-01", cache_dir=".cache")
-result = run_backtest(
-    closes=ohlc["Close"],
-    opens=ohlc["Open"],
-    strategy=SMACrossover(fast=50, slow=200),
-    cost_model=CostModel(),
-)
-print(summarize(result.equity_curve))
+# 1. Survivorship-free universe + prices
+panel = sp500_membership_panel("2010-01-01", "2024-12-31")
+ohlc = load_ohlc(list(panel.columns), "2010-01-01", "2024-12-31", cache_dir=".cache")
+closes = ohlc["Close"].dropna(axis=1, how="all").ffill()
+
+# 2. Cross-sectional signals, z-scored and combined
+dates = monthly_rebalance_dates(closes)
+signals = {
+    "momentum": zscore_cross_section(momentum_signal(closes, dates)),
+    "low_vol":  zscore_cross_section(low_vol_signal(closes, dates)),
+}
+fwd = forward_returns(closes, dates)
+
+# 3. Leakage-safe ML forecast: rank IC + t-stat vs a Ridge baseline
+X, y = build_design_matrix(signals, fwd)
+result = fit_cross_sectional_forecast(X, y, train_size=36, test_size=1, purge=1)
+print(f"IC {result.mean_ic:+.4f}  t {result.ic_tstat:+.2f}  (Ridge {result.baseline_mean_ic:+.4f})")
+
+# 4. Scores -> cost-aware long-short portfolio
+scores = result.predictions.unstack()              # (date x ticker)
+weights = scores_to_weights(scores, long_short=True, quantile=0.2)
+pf = backtest_portfolio(weights, closes, cost_model=CostModel(), adjustment=0.5)
+print(pf.equity_curve.iloc[-1], "net vs", pf.gross_equity_curve.iloc[-1], "gross")
 ```
 
 ## Point-in-time membership (avoid survivorship bias)
 
-By default, `backtest` uses today's S&P 500 list as the universe — implicitly
-assuming you knew the future winners. Pass `--point-in-time` to reconstruct
-historical membership instead:
-
-```bash
-backtest --point-in-time --start 2010-01-01
-```
-
-This fetches the Wikipedia changes table, builds a date×ticker membership
-panel, and constrains the strategy to only signal names that were actually
-in the index on each date. Positions are force-exited when a name leaves
-the index.
-
-Programmatic use:
-
-```python
-from equity_backtester import run_backtest, sp500_membership_panel
-from equity_backtester.data import load_ohlc
-
-panel = sp500_membership_panel("2010-01-01", "2025-01-01")
-ohlc = load_ohlc(list(panel.columns), "2010-01-01", "2025-01-01", cache_dir=".cache")
-result = run_backtest(
-    closes=ohlc["Close"].dropna(axis=1, how="all").ffill(),
-    opens=ohlc["Open"].dropna(axis=1, how="all").ffill(),
-    strategy=...,
-    membership_mask=panel,
-)
-```
+By default `backtest` uses today's S&P 500 list — implicitly assuming you knew
+the future winners. `--point-in-time` reconstructs historical membership from
+the Wikipedia changes table, builds a date×ticker mask, constrains signals to
+names actually in the index on each date, and force-exits positions when a name
+leaves.
 
 Caveats specific to this mode:
 - Wikipedia's changes table is reliable from ~2000 onward; older history is patchy.
-- yfinance doesn't always carry delisted tickers; missing names are silently dropped.
-- The mask snaps to the change's "effective date" — we don't model S&P's
-  pre-announcement window (typically ~5 business days).
+- yfinance doesn't carry most delisted tickers; missing names are silently dropped
+  (use `splice_delistings` with a delisting-inclusive source to model terminal moves).
+- The mask snaps to the change's effective date — S&P's ~5-day pre-announcement
+  window is not modeled.
 
-## Execution model
+## Execution & cost model
 
-- Signals are computed using close-of-day data.
-- Trades execute at the **next session's open** — no look-ahead bias.
-- Portfolio is equal-weighted across the active signaled set, rebalanced when
-  the signal set changes.
-- Fractional shares allowed; no margin, no shorts.
+- Signals computed at close; trades execute at the **next session's open**.
+- Equal-weight across the active signaled set (`engine`), or quantile / drifting
+  weights with partial-adjustment rebalancing (`portfolio`).
+- Fractional shares; the simple engine is long-only, the portfolio layer supports
+  dollar-neutral long-short with optional short-borrow financing.
+- Default costs (2025/2026 schedule): SEC Section 31 $27.80 per $1M of sales,
+  FINRA TAF $0.000166/share capped at $9.27/trade, $0 commission, 1 bp slippage
+  per side. Override via `CostModel(...)`, or pass a `corwin_schultz_spread`
+  panel for per-name spreads.
 
-## Caveats
-
-- **Survivorship bias.** Default mode uses today's S&P 500 list; pass
-  `--point-in-time` to reconstruct historical membership (see the section above).
-- **yfinance data quality.** Fine for research-grade backtests; not adequate
-  for production. Watch for occasional missing bars.
-- **No margin / short / borrow modeling.** Long-only by design.
-- **No tax modeling.** Wash sales, short-term vs long-term capital gains,
-  Section 1256 — all ignored.
-- **No realistic execution.** Open-fill assumption ignores liquidity, market
-  impact, and the difference between official-open and your tradeable price.
-
-## Layout
+## Module map
 
 ```
 src/equity_backtester/
-  universe.py   — S&P 500 ticker scrape
-  data.py       — yfinance loader + NYSE calendar, parquet-cached
-  strategy.py   — Strategy ABC and SMACrossover
-  costs.py      — US-equity transaction-cost model
-  engine.py     — vectorized backtest loop
-  metrics.py    — Sharpe, drawdown, CAGR, Calmar
-  cli.py        — `backtest` entry point
-tests/          — pytest suite (no network calls)
-.github/        — CI: lint + tests on 3.10/3.11/3.12
+  universe.py     — point-in-time S&P 500/600 membership + current tickers
+  data.py         — yfinance loader, NYSE calendar, parquet cache, delisting splice
+  fundamentals.py — SEC EDGAR filing-date FactStore (gross profitability, SUE, ...)
+  factors.py      — Fama-French factor data + HAC (Newey-West) factor attribution
+  signals.py      — cross-sectional signal library (momentum/reversal/low-vol/value/...)
+  bab.py          — Betting-Against-Beta factor (Frazzini-Pedersen)
+  forecast.py     — cross-sectional ML forecast (GBM vs Ridge), purged walk-forward IC
+  meta.py         — meta-labeling: a classifier that sizes the primary model's bets
+  portfolio.py    — scores -> quantile weights -> cost-aware drifting backtest
+  risk.py         — volatility-targeting overlay (Moreira-Muir)
+  engine.py       — vectorized long-only next-open backtest loop
+  costs.py        — US regulatory cost model + Corwin-Schultz spread estimator
+  metrics.py      — Sharpe/CAGR/Calmar + PBO, Deflated & Probabilistic Sharpe
+  walkforward.py  — walk-forward and combinatorial purged CV (CPCV)
+  strategy.py     — Strategy ABC and SMACrossover
+  cli.py          — `backtest` entry point
+tests/            — 174 tests, no network (HTTP and yfinance are mocked)
+.github/          — CI: ruff lint + pytest on Python 3.10 / 3.11 / 3.12
 ```
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for how these fit together and the
+correctness decision behind each stage.
+
+## Caveats
+
+- **Data quality.** yfinance is research-grade, not production: survivor-only,
+  occasional missing bars, no delisting returns. Fundamental coverage on EDGAR
+  is partial (value ~56%, profitability ~34% of name-months in testing).
+- **Survivorship still bites the default path.** `--point-in-time` removes index
+  survivorship, but yfinance's missing delistings reintroduce some.
+- **No tax, margin, or true market-impact modeling.** Costs are linear; the
+  open-fill assumption ignores liquidity and the official-open-vs-tradeable gap.
+- **Statistical significance is approximate.** IC t-stats assume IID-across-dates;
+  real factor returns are autocorrelated, so treat thin t-stats as optimistic.
 
 ## Extending
 
-Add a new strategy by subclassing `Strategy` and implementing
-`generate_signals(prices) -> DataFrame` returning 0/1 (or fractional weights
-if you want non-equal allocation; the engine will renormalize across the
-signaled set).
-
-To swap brokers, construct `CostModel(commission_per_share=..., slippage_bps=...)`
-and pass it into `run_backtest`.
+- **New strategy (engine):** subclass `Strategy` and implement
+  `generate_signals(prices) -> DataFrame` of 0/1 signals.
+- **New signal (research):** add a function returning a (dates × tickers) panel,
+  z-score it with `zscore_cross_section`, and sanity-check its sign with
+  `quantile_spread` before trusting it.
+- **New broker:** construct `CostModel(commission_per_share=..., slippage_bps=...)`.
+- **Validate honestly:** never report a single Sharpe from a parameter search —
+  run `combinatorial_walk_forward` for a *distribution* of OOS paths and
+  `probability_of_backtest_overfitting` / `deflated_sharpe_ratio` to discount it.
