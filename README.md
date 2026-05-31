@@ -17,7 +17,7 @@ cost-aware portfolios → honest out-of-sample evaluation.
 > rule (~15.9% CAGR, 0.99 Sharpe) **underperforms** equal-weight buy-and-hold
 > (~18.2% CAGR, 1.02 Sharpe). There is no robust tradeable alpha in this data.
 > That's the point: the tooling is built to reach that conclusion instead of
-> manufacturing a false one. See [`dashboard.html`](dashboard.html) for the
+> manufacturing a false one. See the [live dashboard](https://thoth144.github.io/us-equity-backtester/dashboard.html) for the
 > full research write-up.
 
 ## What makes it "US-specialized" and honest
